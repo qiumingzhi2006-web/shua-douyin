@@ -1,0 +1,67 @@
+# 刷抖音 (shua-douyin)
+
+DSH 插件。用一个小号在本地 Edge 窗口里读抖音推荐流（精选页），挑一条没刷过的视频，写一句感想，把结果记到本地并回给会话。点赞、收藏、评论默认全部关闭，需要显式配置才执行。
+
+它**不**改资料、**不**发作品、**不**关注别人、**不**加好友。频控（生效时段、每日上限、最小间隔）默认开启，拦下时会直接说明原因。
+
+## 提供的工具
+
+| 工具 | 作用 |
+|---|---|
+| `dy_login` | 弹出登录窗口扫码，最多等 8 分钟，检测到登录后自动关窗并保存登录态 |
+| `dy_status` | 查登录态、今日已刷条数、上轮时间（短暂开一次屏幕外浏览器读 cookie） |
+| `dy_run` | 刷一轮：抓推荐流 → 挑一条没刷过的 → 写感想 →（按配置）点赞/收藏/评论 → 记录 |
+| `dy_report` | 只读本地文件，看今天刷了几条、最近刷到什么、写了什么 |
+| `dy_config` | 读写配置（时段、上限、间隔、互动开关、模型 key） |
+
+## 安装
+
+```sh
+dsh plugin add https://github.com/<owner>/shua-douyin
+```
+
+或在 profile 的 `package.json` 里用 `link:` 指向本地目录，再把包名加进 `dsh.profile.bundles`。
+
+## 首次使用
+
+1. `dy_login` —— 窗口会出现在屏幕左上角，在里面扫码登录**你自己的小号**
+2. `dy_status` —— 确认返回「有效」
+3. `dy_run` —— 刷第一轮
+
+## 配置
+
+`dy_config` 读写的文件在 `~/.dsh/shua-douyin/config.json`，默认值：
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `windowStart` / `windowEnd` | 9 / 22 | 只在这个小时区间内允许刷 |
+| `maxPerDay` | 6 | 每天最多刷几条 |
+| `minGapMin` | 45 | 两轮之间至少隔多少分钟 |
+| `feedUrl` | `https://www.douyin.com/jingxuan` | 抓取的页面 |
+| `browserChannel` | `msedge` | 用哪个浏览器（`msedge` / `chrome`，需本机已装） |
+| `interact.like` / `.collect` / `.comment` | 全 `false` | 是否点赞 / 收藏 / 发表评论 |
+| `commentText` | 空 | 开启评论时要发的内容 |
+| `model.apiKey` | 空 | 不填则用内置短句，不调用任何模型 |
+
+改单项，例如：`dy_config(action="set", key="maxPerDay", value="3")`。
+
+## 数据
+
+都在 `~/.dsh/shua-douyin/`：
+
+- `profile/` —— 浏览器登录态（含抖音 cookie，注意保管）
+- `state.json` —— 今日计数、上轮时间、看过的视频指纹
+- `journal.jsonl` —— 每轮的记录
+- `config.json` —— 配置
+- `run.log` —— 运行日志
+
+## 已知限制
+
+- 抓取依赖抖音网页当前的 DOM 结构（`div[class*="video"]`），改版后需要跟着改。
+- 登录必须真人扫码；遇到验证码中间页会报错退出，不尝试绕过。
+- 只读推荐流，不做搜索、不做私信、不做发布。
+- 使用的是你自己的抖音账号，账号风控与平台规则由你自行承担；新号建议把每日上限调到 1-2 条。
+
+## 许可
+
+MIT
