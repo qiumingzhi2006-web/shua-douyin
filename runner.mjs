@@ -105,6 +105,8 @@ function appendJournal(entry) {
   try { fs.appendFileSync(JOURNAL_FILE, JSON.stringify({ ts: Date.now(), ...entry }) + '\n') } catch { /* 忽略 */ }
 }
 
+let UI_MODE = false
+
 async function openBrowser({ interactive }) {
   const cfg = loadConfig()
   ensureHome()
@@ -529,6 +531,19 @@ async function interact(cfg, page, st, feel) {
             result.via.comment = echoed.inList ? '发送（已出现在评论列表）' : echoed.boxEmpty ? '发送（输入框已清空）' : '发送（无回显，可能没发出去）'
             if (result.commented) st.quota.comment += 1
             result.text = text
+            if (!result.commented && UI_MODE) {
+              log('评论没回显：如果窗口里弹出验证码，请人工完成验证，我最多等 90 秒')
+              for (let i = 0; i < 3; i++) {
+                await page.waitForTimeout(30000)
+                const ok = await page.evaluate((t) => Array.from(document.querySelectorAll('[data-e2e="comment-item"]')).some((e) => (e.innerText || '').includes(t)), text).catch(() => false)
+                if (ok) {
+                  result.commented = true
+                  result.via.comment = '人工过验证后已发出'
+                  st.quota.comment += 1
+                  break
+                }
+              }
+            }
           }
         }
       } catch (e) {
@@ -541,7 +556,8 @@ async function interact(cfg, page, st, feel) {
   return result
 }
 
-async function doRun({ force }) {
+async function doRun({ force, ui }) {
+  UI_MODE = !!ui
   const cfg = loadConfig()
   const now = new Date()
   const hour = now.getHours()
@@ -563,7 +579,7 @@ async function doRun({ force }) {
     return
   }
 
-  const { ctx, page } = await openBrowser({ interactive: false })
+  const { ctx, page } = await openBrowser({ interactive: !!ui })
   try {
     const cards = await readFeed(page, cfg.feedUrl)
     if (cards.length === 0) {
@@ -667,7 +683,7 @@ try {
   else if (argv.includes('--status')) await doStatus()
   else if (argv.includes('--config')) doConfig()
   else if (argv.includes('--probe')) await doProbe()
-  else await doRun({ force: argv.includes('--force') })
+  else await doRun({ force: argv.includes('--force'), ui: argv.includes('--ui') || argv.includes('--interactive') })
 } catch (e) {
   log('异常: ' + (e && e.stack ? e.stack : e))
   emit({ ok: false, error: e && e.message ? e.message : String(e) })
