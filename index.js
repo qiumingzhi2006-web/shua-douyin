@@ -151,10 +151,21 @@ function tools() {
         }
         const it = res.interaction || {}
         const flags = `赞${it.liked ? '✓' : '✗'} 藏${it.collected ? '✓' : '✗'} 评${it.commented ? '✓' : '✗'}`
+        const name = String(it.at || '').replace(/^@/, '')
+        const atLine = it.at ? `　@${name}${it.mentioned ? '✓' : '（联想没匹配，@ 只作为文字发出）'}` : '　（未设 atHandle，评论不带 @）'
+        const why = Object.keys(it.skipped || {}).map((k) => `${k}: ${it.skipped[k]}`).join('；')
+        const q = it.quota ? `\n今日互动：赞 ${it.quota.like} · 藏 ${it.quota.collect} · 评 ${it.quota.comment}` : ''
+        const maxRounds = Number(res.maxPerDay)
+        const rounds = Number.isFinite(maxRounds) && maxRounds < 0
+          ? `今日 ${res.count} 条（无上限）`
+          : `今日 ${res.count}/${res.maxPerDay}`
         return {
           ok: true,
           message: `刷到一条（本轮候选 ${res.candidates} 条，没看过 ${res.fresh} 条）：\n\n`
-            + `「${res.title}」\n→ ${res.feel}\n\n${flags}　今日 ${res.count}/${res.maxPerDay}`,
+            + `「${res.title}」\n→ ${res.feel}\n\n${flags}${atLine}　${rounds}`
+            + (it.text ? `\n评论内容：${it.text}` : '')
+            + (why ? `\n没做成的：${why}` : '')
+            + q,
         }
       }),
     },
@@ -216,8 +227,22 @@ function tools() {
         const st = readJson(STATE_FILE, {})
         const today = new Date().toISOString().slice(0, 10)
         const todayCount = st.date === today ? (Number(st.count) || 0) : 0
+        const cap = cfg.quota || {}
+        const q = st.quota && st.quota.date === today ? st.quota : { like: 0, collect: 0, comment: 0 }
+        const atName = String(cfg.atHandle || '').replace(/^@/, '').trim()
         const rows = readJournal(limit)
-        const head = `今日已刷 ${todayCount}/${maxPerDay} 条，上轮：${fmtTime(st.lastAt)}，累计记录 ${Array.isArray(st.seen) ? st.seen.length : 0} 条`
+        // 额度 -1 是「不限」，这里统一成「3（无上限）」这种说法
+        const usedText = (used, capValue) => {
+          const n = Number(used) || 0
+          const c = Number(capValue)
+          return Number.isFinite(c) && c < 0 ? `${n}（无上限）` : `${n}/${Number.isFinite(c) ? c : 0}`
+        }
+        const rounds = Number(maxPerDay) < 0
+          ? `今日已刷 ${todayCount} 条（无上限）`
+          : `今日已刷 ${todayCount}/${maxPerDay} 条`
+        const head = `${rounds}，上轮：${fmtTime(st.lastAt)}，累计记录 ${Array.isArray(st.seen) ? st.seen.length : 0} 条`
+          + `\n互动额度：赞 ${usedText(q.like, cap.like)}　藏 ${usedText(q.collect, cap.collect)}　评 ${usedText(q.comment, cap.comment)}`
+          + `\n@账号：${atName ? '@' + atName : '未设置（评论不带 @）'}`
         if (rows.length === 0) return { ok: true, message: head + '\n\n还没有任何刷片记录。' }
         const body = rows.map((r, i) => {
           const it = r.interaction || {}
@@ -228,10 +253,36 @@ function tools() {
       },
     },
     {
+      name: 'dy_probe',
+      description: '诊断用：打开推荐页（屏幕外窗口），返回页面里实际出现的 data-e2e 标记和点赞/收藏/评论/输入框选择器的命中情况。'
+        + '当 dy_run 报告「没找到点赞按钮/评论入口/输入框」时用这个，约 30-60 秒。',
+      parameters: {},
+      output: {
+        schema: { type: 'json' },
+        render: (_a, v) => [{ type: 'text', text: v.message }],
+      },
+      execute: guard(async () => {
+        const r = await runRunner(['--probe'], 200000)
+        const res = r.result || {}
+        if (!r.ok && res.error) return { ok: false, message: '诊断失败：' + res.error }
+        const hit = Object.entries(res.hits || {})
+          .map(([k, v]) => `${k}：${(v || []).length ? v.join(' / ') : '没命中'}`)
+          .join('\n')
+        return {
+          ok: true,
+          message: `登录态：${res.loggedIn ? '有效' : '未登录（先 dy_login）'}\n页面标题：${res.title}\n\n`
+            + `选择器命中：\n${hit}\n\n页面里的 data-e2e（前 80 个）：\n${(res.dataE2e || []).join(', ') || '（空）'}`,
+        }
+      }),
+    },
+    {
       name: 'dy_config',
-      description: '读写这个插件的配置（存在 ~/.dsh/shua-douyin/config.json）：生效时段、每日上限、最小间隔、'
-        + '是否点赞/收藏/评论、评论内容、模型 API key 与模型名。'
-        + 'action=get 返回全部配置；action=set 需要 key（支持点路径，如 model.apiKey）与 value。',
+      description: '读写这个插件的配置（存在 ~/.dsh/shua-douyin/config.json）：生效时段、每日上限（maxPerDay）、最小间隔、'
+        + '是否点赞/收藏/评论（interact.like / .collect / .comment）、每日互动额度（quota.like / .collect / .comment）、'
+        + '评论里 @ 的账号（atHandle，填昵称或抖音号，不填就不 @）、评论模板（commentText，支持 {feel} 与 {at} 两个占位）、'
+        + '模型 API key 与模型名。'
+        + 'action=get 返回全部配置；action=set 需要 key（支持点路径，如 model.apiKey、quota.comment）与 value。'
+        + '额度类（quota.like / .collect / .comment、maxPerDay）填 -1 表示不限，不再按天拦截。',
       parameters: {
         action: { type: 'string', description: 'get 或 set' },
         key: { type: 'string', description: 'set 时的配置路径，如 maxPerDay、interact.like、model.apiKey' },
@@ -266,6 +317,127 @@ function tools() {
   ]
 }
 
+/* ---------- 设置面板的数据口（client.js 通过 /api/shua-douyin 读写） ---------- */
+
+function sendJson(res, status, payload) {
+  const body = JSON.stringify(payload)
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  })
+    res.end(body)
+}
+
+function collectBody(req) {
+  return new Promise((resolve) => {
+    let raw = ''
+    let done = false
+    req.on('data', (chunk) => {
+      if (done) return
+      raw += chunk
+      if (raw.length > 200000) {
+        done = true
+        req.destroy()
+        resolve(null)
+      }
+    })
+    req.on('end', () => {
+      if (done) return
+      done = true
+      try { resolve(raw ? JSON.parse(raw) : {}) } catch { resolve(null) }
+    })
+    req.on('error', () => { if (!done) { done = true; resolve(null) } })
+  })
+}
+
+/** 只接受面板认识的字段，避免前端传来别的键把配置写脏 */
+function sanitizePatch(body) {
+  // -1 是「不限」的意思，所以下界是 -1 而不是 0
+  const num = (v) => {
+    const n = Number(v)
+    return Number.isFinite(n) && n >= -1 ? Math.round(n) : undefined
+  }
+  const out = {}
+  if (typeof body.atHandle === 'string') out.atHandle = body.atHandle.trim().slice(0, 40)
+  if (typeof body.commentText === 'string') out.commentText = body.commentText.slice(0, 200)
+  for (const key of ['windowStart', 'windowEnd', 'maxPerDay', 'minGapMin', 'keepSeen', 'mentionWaitMs']) {
+    const v = num(body[key])
+    if (v !== undefined) out[key] = v
+  }
+  if (out.windowStart !== undefined) out.windowStart = Math.min(Math.max(out.windowStart, 0), 23)
+  if (out.windowEnd !== undefined) out.windowEnd = Math.min(Math.max(out.windowEnd, 0), 24)
+  if (out.maxPerDay !== undefined && out.maxPerDay < -1) out.maxPerDay = -1
+  if (out.minGapMin !== undefined && out.minGapMin < 0) out.minGapMin = 0
+  if (body.interact && typeof body.interact === 'object') {
+    out.interact = {
+      like: body.interact.like === true,
+      collect: body.interact.collect === true,
+      comment: body.interact.comment === true,
+    }
+  }
+  if (body.quota && typeof body.quota === 'object') {
+    const q = {}
+    for (const k of ['like', 'collect', 'comment']) {
+      const v = num(body.quota[k])
+      if (v !== undefined) q[k] = v
+    }
+    out.quota = q
+  }
+  return out
+}
+
+async function apiHandler(req, res) {
+  let pathname = '/'
+  try {
+    pathname = (new URL(req.url || '/', 'http://127.0.0.1').pathname || '').replace(/^\/api\/shua-douyin/, '') || '/'
+  } catch { /* 保留 '/' */ }
+
+  if (pathname === '/config' && req.method === 'GET') {
+    sendJson(res, 200, { ok: true, config: readJson(CONFIG_FILE, {}), home: HOME_DIR })
+    return
+  }
+
+  if (pathname === '/config' && req.method === 'POST') {
+    const body = await collectBody(req)
+    if (!body || typeof body !== 'object') {
+      sendJson(res, 400, { ok: false, error: '请求体不是 JSON 对象' })
+      return
+    }
+    const patch = sanitizePatch(body)
+    const cur = readJson(CONFIG_FILE, {})
+    const next = { ...cur }
+    for (const [k, v] of Object.entries(patch)) {
+      if (k === 'interact' || k === 'quota') next[k] = { ...(cur[k] || {}), ...v }
+      else next[k] = v
+    }
+    try {
+      fs.mkdirSync(HOME_DIR, { recursive: true })
+      fs.writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2), 'utf8')
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: '写配置失败：' + error.message })
+      return
+    }
+    sendJson(res, 200, { ok: true, config: next })
+    return
+  }
+
+  if (pathname === '/stats' && req.method === 'GET') {
+    const st = readJson(STATE_FILE, {})
+    const today = new Date().toISOString().slice(0, 10)
+    const quota = st.quota && st.quota.date === today ? st.quota : { like: 0, collect: 0, comment: 0 }
+    sendJson(res, 200, {
+      ok: true,
+      count: st.date === today ? (Number(st.count) || 0) : 0,
+      lastAt: Number(st.lastAt) || 0,
+      quota,
+      recent: readJournal(3),
+    })
+    return
+  }
+
+  sendJson(res, 404, { ok: false, error: 'unknown route: ' + pathname })
+}
+
 export function apply(ctx) {
   const specs = tools()
   const registerAll = () => {
@@ -280,15 +452,30 @@ export function apply(ctx) {
         } catch { /* logger 缺席不影响其他工具 */ }
       }
     }
-    console.log('[shua-douyin] 工具已注册：dy_run / dy_status / dy_login / dy_report / dy_config')
+    console.log('[shua-douyin] 工具已注册：dy_run / dy_status / dy_login / dy_report / dy_probe / dy_config')
   }
   if (typeof ctx.inject === 'function') {
     try {
       ctx.inject(['tools'], registerAll)
-      return
     } catch {
       /* 老宿主没有 inject 语义，退回同步注册 */
+      registerAll()
     }
+    // 设置面板的数据口：面板在 client.js，读写的是同一个 config.json
+    try {
+      ctx.inject(['webServer'], (scoped) => {
+        const server = scoped && scoped.webServer
+        if (!server || typeof server.register !== 'function') return
+        scoped.effect(
+          () => server.register({ kind: 'prefix', path: '/api/shua-douyin', handler: apiHandler }),
+          'shua-douyin: settings api',
+        )
+        console.log('[shua-douyin] 设置面板数据口已挂载：/api/shua-douyin')
+      })
+    } catch (error) {
+      console.error('[shua-douyin] 设置面板挂载失败：' + (error && error.message ? error.message : String(error)))
+    }
+    return
   }
   registerAll()
 }

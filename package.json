@@ -1,20 +1,22 @@
 {
   "name": "shua-douyin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "title": {
     "en": "Douyin Feed Runner",
     "zh": "刷抖音"
   },
-  "description": "Logs a secondary Douyin account in through a local Edge window, reads the For-You feed, picks one unseen video, writes a one-line reaction, and records the result. Active hours, daily cap and minimum gap are configurable.",
+  "description": "Logs a secondary Douyin account in through a local Edge window, reads the For-You feed, picks one unseen video, writes a one-line reaction, and records the result. Likes, collections and comments (with an @ mention) are switchable and quota-limited; active hours, daily cap and minimum gap are configurable.",
   "type": "module",
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
   "files": [
     "index.js",
+    "client.js",
     "runner.mjs",
     "cordis.patch.yml",
     "README.md",
@@ -41,6 +43,14 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
     },
     "engines": {
       "dsh": ">=0.2.0-rc.2 <0.3.0-0"

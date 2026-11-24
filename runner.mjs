@@ -36,7 +36,10 @@ const DEFAULTS = {
   minGapMin: 45,
   keepSeen: 200,
   interact: { like: false, collect: false, comment: false },
-  commentText: '',
+  quota: { like: 6, collect: 4, comment: 3 },
+  commentText: '{feel} {at}',
+  atHandle: '',
+  mentionWaitMs: 1500,
   model: {
     apiKey: '',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
@@ -82,8 +85,16 @@ function loadConfig() {
 
 function loadState() {
   const st = readJson(STATE_FILE, null)
-  if (!st || typeof st !== 'object') return { date: '', count: 0, lastAt: 0, seen: [] }
-  return { date: st.date || '', count: Number(st.count) || 0, lastAt: Number(st.lastAt) || 0, seen: Array.isArray(st.seen) ? st.seen : [] }
+  const base = { date: '', count: 0, lastAt: 0, seen: [], quota: { date: '', like: 0, collect: 0, comment: 0 } }
+  if (!st || typeof st !== 'object') return base
+  const q = st.quota && typeof st.quota === 'object' ? st.quota : {}
+  return {
+    date: st.date || '',
+    count: Number(st.count) || 0,
+    lastAt: Number(st.lastAt) || 0,
+    seen: Array.isArray(st.seen) ? st.seen : [],
+    quota: { date: q.date || '', like: Number(q.like) || 0, collect: Number(q.collect) || 0, comment: Number(q.comment) || 0 },
+  }
 }
 
 function saveState(st) {
@@ -218,70 +229,187 @@ async function generateFeel(cfg, text) {
   return FALLBACK_LINES[Math.floor(Math.random() * FALLBACK_LINES.length)]
 }
 
-async function interact(cfg, page) {
-  const result = { liked: false, collected: false, commented: false }
-  if (!cfg.interact.like && !cfg.interact.collect && !cfg.interact.comment) return result
-  await page.waitForTimeout(2000)
-  if (cfg.interact.like) {
+/* ---------- 互动：点赞 / 收藏 / 评论（含 @ 提及） ---------- */
+
+const SEL = {
+  like: ['[data-e2e="video-player-digg"]', '[data-e2e="feed-like"]', '[data-e2e="like-icon"]', '[data-e2e="digg-icon"]'],
+  collect: ['[data-e2e="video-player-collect"]', '[data-e2e="feed-collect"]', '[data-e2e="collect-icon"]'],
+  comment: ['[data-e2e="video-player-comment"]', '[data-e2e="feed-comment"]', '[data-e2e="comment-icon"]'],
+  commentBox: ['[data-e2e="comment-input"]', 'div[contenteditable="true"]', 'textarea[placeholder*="评论"]', 'textarea'],
+  publish: ['[data-e2e="comment-publish"]', '[data-e2e="comment-publish-btn"]', 'button:has-text("发送")', 'button:has-text("发布")'],
+  atItem: ['[data-e2e="comment-at-item"]', '[role="option"]', '[class*="at-list"] li', '[class*="suggest"] li'],
+}
+
+/** 额度用 -1 表示不限；其余按整数天计数 */
+function quotaCap(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return 0
+  return n < 0 ? -1 : Math.round(n)
+}
+
+function overQuota(used, cap) {
+  return cap < 0 ? false : used >= cap
+}
+
+function quotaText(used, cap) {
+  return cap < 0 ? `${used}（无上限）` : `${used}/${cap}`
+}
+
+function normalizeHandle(h) {
+  const s = String(h || '').trim()
+  if (!s) return ''
+  return s.startsWith('@') ? s : '@' + s
+}
+
+/** 评论内容：模板里 {feel} 换成感想，{at} 换成 @账号 */
+function buildComment(cfg, feel) {
+  const at = normalizeHandle(cfg.atHandle)
+  const tpl = String(cfg.commentText || '').trim() || '{feel} {at}'
+  const text = tpl.replace(/\{feel\}/g, feel || '').replace(/\{at\}/g, at).replace(/\s+/g, ' ').trim()
+  return { text, at }
+}
+
+/** 先按 data-e2e/结构化选择器点，再退回按文字点，返回 { ok, already, via } */
+async function clickAny(page, selectors, texts) {
+  for (const sel of selectors) {
     try {
-      result.liked = await page.evaluate(() => {
-        for (const el of document.querySelectorAll('span, div, button')) {
-          if (!el.offsetParent) continue
-          const t = (el.textContent || '').trim()
-          if (t === '赞' || t === '点赞') { el.click(); return true }
-        }
-        return false
-      })
-    } catch { /* 页面结构变化 */ }
-    if (result.liked) await page.waitForTimeout(800)
+      const el = page.locator(sel).first()
+      if (!(await el.count())) continue
+      if (!(await el.isVisible().catch(() => false))) continue
+      const pressed = await el.getAttribute('aria-pressed').catch(() => null)
+      if (pressed === 'true') return { ok: true, already: true, via: sel }
+      await el.click({ timeout: 3000 })
+      return { ok: true, via: sel }
+    } catch { /* 换下一个选择器 */ }
   }
-  if (cfg.interact.collect) {
+  const hit = await page.evaluate((words) => {
+    for (const el of Array.from(document.querySelectorAll('span, div, button'))) {
+      if (!el.offsetParent) continue
+      const t = (el.textContent || '').trim()
+      if (words.includes(t)) { el.click(); return t }
+    }
+    return ''
+  }, texts || []).catch(() => '')
+  return hit ? { ok: true, via: 'text:' + hit } : { ok: false, via: '' }
+}
+
+/** @ 之后在联想候选里挑同名项；挑不到就保留纯文本 */
+async function pickAt(page, at, waitMs) {
+  const name = at.replace(/^@/, '').trim()
+  if (!name) return false
+  await page.waitForTimeout(waitMs)
+  for (const sel of SEL.atItem) {
     try {
-      result.collected = await page.evaluate(() => {
-        for (const el of document.querySelectorAll('span, div, button')) {
-          if (!el.offsetParent) continue
-          if ((el.textContent || '').trim() === '收藏') { el.click(); return true }
-        }
-        return false
-      })
-    } catch { /* 页面结构变化 */ }
-    if (result.collected) await page.waitForTimeout(800)
-  }
-  if (cfg.interact.comment && cfg.commentText) {
-    try {
-      const opened = await page.evaluate(() => {
-        for (const el of document.querySelectorAll('span, div, button')) {
-          if (!el.offsetParent) continue
-          if ((el.textContent || '').trim() === '评论') { el.click(); return true }
-        }
-        return false
-      })
-      if (opened) {
-        await page.waitForTimeout(2000)
-        const typed = await page.evaluate((text) => {
-          for (const el of document.querySelectorAll('textarea, [contenteditable="true"]')) {
-            if (!el.offsetParent) continue
-            el.focus()
-            el.textContent = text
-            el.dispatchEvent(new Event('input', { bubbles: true }))
-            return true
-          }
-          return false
-        }, cfg.commentText)
-        if (typed) {
-          await page.waitForTimeout(1000)
-          await page.evaluate(() => {
-            for (const el of document.querySelectorAll('button, span')) {
-              if (!el.offsetParent) continue
-              const t = (el.textContent || '').trim()
-              if (t === '发送' || t === '发布') { el.click(); return }
-            }
-          })
-          result.commented = true
-        }
+      const items = page.locator(sel)
+      const n = await items.count()
+      for (let i = 0; i < Math.min(n, 8); i++) {
+        const it = items.nth(i)
+        if (!(await it.isVisible().catch(() => false))) continue
+        const t = (await it.innerText().catch(() => '')) || ''
+        if (t.includes(name)) { await it.click({ timeout: 3000 }); return true }
       }
-    } catch { /* 评论区失败不阻塞主流程 */ }
+    } catch { /* 换下一个选择器 */ }
   }
+  return false
+}
+
+async function interact(cfg, page, st, feel) {
+  const today = new Date().toISOString().slice(0, 10)
+  if (!st.quota || st.quota.date !== today) st.quota = { date: today, like: 0, collect: 0, comment: 0 }
+
+  const cap = cfg.quota || {}
+  const result = {
+    liked: false, collected: false, commented: false, mentioned: false,
+    at: normalizeHandle(cfg.atHandle),
+    via: {}, skipped: {},
+    quota: { ...st.quota },
+  }
+
+  if (!cfg.interact.like && !cfg.interact.collect && !cfg.interact.comment) return result
+  await page.waitForTimeout(1500)
+
+  if (cfg.interact.like) {
+    const max = quotaCap(cap.like)
+    if (overQuota(st.quota.like, max)) result.skipped.like = `今日点赞额度用完（${quotaText(st.quota.like, max)}）`
+    else {
+      const r = await clickAny(page, SEL.like, ['点赞', '赞'])
+      if (r.ok) {
+        result.liked = true
+        result.via.like = r.via
+        if (!r.already) st.quota.like += 1
+        await page.waitForTimeout(900)
+      } else result.skipped.like = '没找到点赞按钮（页面结构可能变了，可跑 --probe 看）'
+    }
+  }
+
+  if (cfg.interact.collect) {
+    const max = quotaCap(cap.collect)
+    if (overQuota(st.quota.collect, max)) result.skipped.collect = `今日收藏额度用完（${quotaText(st.quota.collect, max)}）`
+    else {
+      const r = await clickAny(page, SEL.collect, ['收藏'])
+      if (r.ok) {
+        result.collected = true
+        result.via.collect = r.via
+        if (!r.already) st.quota.collect += 1
+        await page.waitForTimeout(900)
+      } else result.skipped.collect = '没找到收藏按钮'
+    }
+  }
+
+  if (cfg.interact.comment) {
+    const max = quotaCap(cap.comment)
+    const built = buildComment(cfg, feel)
+    if (overQuota(st.quota.comment, max)) result.skipped.comment = `今日评论额度用完（${quotaText(st.quota.comment, max)}）`
+    else if (!built.text) result.skipped.comment = '评论内容为空（commentText 与 feel 都没东西）'
+    else {
+      try {
+        const opened = await clickAny(page, SEL.comment, ['评论'])
+        if (!opened.ok) result.skipped.comment = '没找到评论入口'
+        else {
+          await page.waitForTimeout(2000)
+          let boxSel = ''
+          for (const sel of SEL.commentBox) {
+            try {
+              const el = page.locator(sel).first()
+              if ((await el.count()) && (await el.isVisible().catch(() => false))) { boxSel = sel; break }
+            } catch { /* 下一个 */ }
+          }
+          if (!boxSel) result.skipped.comment = '没找到评论输入框'
+          else {
+            const box = page.locator(boxSel).first()
+            await box.click({ timeout: 5000 })
+            const { text, at } = built
+            const name = at.replace(/^@/, '')
+            if (at && name && text.includes(at)) {
+              const idx = text.indexOf(at)
+              const before = text.slice(0, idx).trim()
+              const after = text.slice(idx + at.length).trim()
+              if (before) await page.keyboard.type(before, { delay: 60 })
+              await page.keyboard.type(at, { delay: 100 })
+              result.mentioned = await pickAt(page, at, Number(cfg.mentionWaitMs) || 1500)
+              if (!result.mentioned) result.via.at = '联想候选没匹配到，@ 只作为文本留在评论里'
+              if (after) await page.keyboard.type(after, { delay: 60 })
+            } else {
+              await page.keyboard.type(text, { delay: 60 })
+            }
+            await page.waitForTimeout(800)
+            const pub = await clickAny(page, SEL.publish, ['发送', '发布'])
+            if (!pub.ok) {
+              await page.keyboard.press('Enter').catch(() => {})
+            }
+            result.commented = true
+            result.via.comment = pub.ok ? pub.via : 'Enter'
+            st.quota.comment += 1
+            result.text = text
+          }
+        }
+      } catch (e) {
+        result.skipped.comment = '评论过程中出错：' + (e && e.message ? e.message : String(e))
+      }
+    }
+  }
+
+  result.quota = { ...st.quota }
   return result
 }
 
@@ -296,8 +424,9 @@ async function doRun({ force }) {
   const st = loadState()
   const today = now.toISOString().slice(0, 10)
   if (st.date !== today) { st.date = today; st.count = 0 }
-  if (st.count >= cfg.maxPerDay) {
-    emit({ ok: false, skipped: `今天已刷 ${st.count} 条（上限 ${cfg.maxPerDay}）`, count: st.count })
+  const maxRounds = quotaCap(cfg.maxPerDay)
+  if (overQuota(st.count, maxRounds)) {
+    emit({ ok: false, skipped: `今天已刷 ${st.count} 条（上限 ${maxRounds}）`, count: st.count })
     return
   }
   if (!force && st.lastAt && (now.getTime() - st.lastAt) / 60000 < cfg.minGapMin) {
@@ -320,7 +449,7 @@ async function doRun({ force }) {
     }
     const picked = fresh[Math.floor(Math.random() * fresh.length)]
     const feel = await generateFeel(cfg, picked)
-    const interaction = await interact(cfg, page)
+    const interaction = await interact(cfg, page, st, feel)
     st.count += 1
     st.lastAt = now.getTime()
     st.seen = [...st.seen, picked].slice(-cfg.keepSeen)
@@ -348,11 +477,35 @@ function doConfig() {
   emit({ ok: true, home: HOME, config: loadConfig() })
 }
 
+/** 诊断：列出推荐页里可用的 data-e2e、按钮文字，以及互动选择器的命中情况 */
+async function doProbe() {
+  const { ctx, page, cfg } = await openBrowser({ interactive: false })
+  try {
+    await page.goto(cfg.feedUrl, { waitUntil: 'domcontentloaded', timeout: 45000 })
+    await page.waitForTimeout(6000)
+    const loggedIn = await isLoggedIn(ctx)
+    const dataE2e = await page.evaluate(() => Array.from(new Set(Array.from(document.querySelectorAll('[data-e2e]')).map((e) => e.getAttribute('data-e2e')))).slice(0, 80)).catch(() => [])
+    const hits = {}
+    for (const [k, sels] of Object.entries(SEL)) {
+      hits[k] = []
+      for (const s of sels) {
+        try { if (await page.locator(s).count()) hits[k].push(s) } catch { /* 忽略 */ }
+      }
+    }
+    emit({ ok: true, loggedIn, title: await page.title(), dataE2e, hits })
+  } catch (e) {
+    emit({ ok: false, error: e && e.message ? e.message : String(e) })
+  } finally {
+    await ctx.close()
+  }
+}
+
 const argv = process.argv.slice(2)
 try {
   if (argv.includes('--login')) await doLogin()
   else if (argv.includes('--status')) await doStatus()
   else if (argv.includes('--config')) doConfig()
+  else if (argv.includes('--probe')) await doProbe()
   else await doRun({ force: argv.includes('--force') })
 } catch (e) {
   log('异常: ' + (e && e.stack ? e.stack : e))
