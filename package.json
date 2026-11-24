@@ -1,0 +1,49 @@
+{
+  "name": "shua-douyin",
+  "version": "0.1.0",
+  "title": {
+    "en": "Douyin Feed Runner",
+    "zh": "刷抖音"
+  },
+  "description": "Logs a secondary Douyin account in through a local Edge window, reads the For-You feed, picks one unseen video, writes a one-line reaction, and records the result. Active hours, daily cap and minimum gap are configurable.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "index.js",
+    "runner.mjs",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "assets"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "douyin",
+    "browser",
+    "playwright"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright-core": "^1.65.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2 <0.2.1-0 || >=0.2.1-rc.2 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "engines": {
+      "dsh": ">=0.2.0-rc.2 <0.3.0-0"
+    }
+  }
+}

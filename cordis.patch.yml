@@ -1,0 +1,11 @@
+# Bundle patch for shua-douyin（刷抖音）.
+#
+# 让这个包成为 profile 的一层而不是一个「装了但什么都不做」的依赖：
+# dsh 会把 dsh.profile.bundles 里声明了 dsh.bundle.patch 的包挂进 layer stack，
+# 下面这行 insert 负责真正挂载插件。
+# 注意：name 必须是真实包名（cordis 按 name import 包），改包名时这里要同步。
+# id 必须与包名一致：市场收录预检按它比对 entryIds，
+# 中文 id 在界面里也不会生效（卡片标题走市场的本地化 title，不走包内 id）。
+- insert:
+    - id: shua-douyin
+      name: shua-douyin
