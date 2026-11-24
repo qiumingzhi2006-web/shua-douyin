@@ -180,15 +180,18 @@ async function readFeed(page, feedUrl) {
     await page.waitForTimeout(2200)
     const batch = await page.evaluate(() => {
       const out = []
-      for (const el of Array.from(document.querySelectorAll('div[class*="video"]'))) {
+      for (const el of Array.from(document.querySelectorAll('[data-aweme-id]'))) {
+        const id = el.getAttribute('data-aweme-id') || ''
+        if (!/^\d{15,}$/.test(id)) continue
         const t = (el.innerText || '').replace(/\s+/g, ' ').trim()
-        if (t.length >= 20 && t.length <= 220) out.push(t)
+        if (t.length < 8) continue
+        out.push({ id, title: t.slice(0, 160) })
       }
       return out.slice(0, 40)
     })
-    for (const c of batch) if (!cards.has(c)) cards.set(c, true)
+    for (const c of batch) if (!cards.has(c.id)) cards.set(c.id, c)
   }
-  return [...cards.keys()]
+  return [...cards.values()]
 }
 
 async function generateFeel(cfg, text) {
@@ -234,8 +237,8 @@ async function generateFeel(cfg, text) {
 const SEL = {
   like: ['[data-e2e="video-player-digg"]', '[data-e2e="feed-like"]', '[data-e2e="like-icon"]', '[data-e2e="digg-icon"]'],
   collect: ['[data-e2e="video-player-collect"]', '[data-e2e="feed-collect"]', '[data-e2e="collect-icon"]'],
-  comment: ['[data-e2e="video-player-comment"]', '[data-e2e="feed-comment"]', '[data-e2e="comment-icon"]'],
-  commentBox: ['[data-e2e="comment-input"]', 'div[contenteditable="true"]', 'textarea[placeholder*="评论"]', 'textarea'],
+  comment: ['[data-e2e="feed-comment-icon"]', '[data-e2e="video-player-comment"]', '[data-e2e="feed-comment"]', '[data-e2e="comment-icon"]'],
+  commentBox: ['div[role="textbox"]', '[contenteditable]', 'input[placeholder*="精彩评论"]', 'input[placeholder*="评论"]', '[data-e2e="comment-input"]', 'div[contenteditable="true"]', 'textarea'],
   publish: ['[data-e2e="comment-publish"]', '[data-e2e="comment-publish-btn"]', 'button:has-text("发送")', 'button:has-text("发布")'],
   atItem: ['[data-e2e="comment-at-item"]', '[role="option"]', '[class*="at-list"] li', '[class*="suggest"] li'],
 }
@@ -313,6 +316,95 @@ async function pickAt(page, at, waitMs) {
   return false
 }
 
+/** 详情页视频下方那排图标（点赞/评论/收藏/分享）在桌面版没有 data-e2e，只能按几何位置找 */
+async function bottomIcons(page) {
+  return page.evaluate(() => {
+    const v = document.querySelector('video')
+    if (!v) return []
+    const vr = v.getBoundingClientRect()
+    const out = []
+    for (const el of Array.from(document.querySelectorAll('svg'))) {
+      const r = el.getBoundingClientRect()
+      if (!r.width || !r.height) continue
+      if (r.y < vr.bottom + 40 || r.y > vr.bottom + 200) continue
+      if (r.x < vr.left - 40 || r.x > vr.left + 600) continue
+      out.push({ x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) })
+    }
+    const groups = []
+    for (const it of out.sort((a, b) => a.x - b.x)) {
+      const g = groups[groups.length - 1]
+      if (g && Math.abs(it.x - g.x) < 12) continue
+      groups.push(it)
+    }
+    return groups.map((it) => ({ cx: it.x + it.w / 2, cy: it.y + it.h / 2 }))
+  }).catch(() => [])
+}
+
+/** 心形是否已点亮（抖音红 #FE2C55） */
+async function likedState(page, pt) {
+  if (!pt) return null
+  return page.evaluate((p) => {
+    const el = document.elementFromPoint(p.cx, p.cy)
+    if (!el) return null
+    const svg = el.tagName === 'svg' ? el : el.closest('svg')
+    if (!svg) return null
+    const styles = Array.from(svg.querySelectorAll('path, use, g, circle')).map((n) => {
+      const s = getComputedStyle(n)
+      return (s.fill || '') + '|' + (s.stroke || '')
+    }).join(';')
+    return /254,\s*44,\s*85|fe2c55/i.test(styles)
+  }, pt)
+}
+
+/** 抖音评论框是"点一下占位文字才激活"，先找到那句占位提示点进去 */
+async function openCommentBox(page) {
+  const pt = await page.evaluate(() => {
+    for (const el of Array.from(document.querySelectorAll('div, span, p, label')) ) {
+      if (!el.offsetParent) continue
+      const t = (el.textContent || '').trim()
+      if (t.length > 20) continue
+      if (!/留下你的精彩评论吧|精彩评论|说点什么|善语结善缘/.test(t)) continue
+      const r = el.getBoundingClientRect()
+      if (!r.width || !r.height) continue
+      return { cx: Math.round(r.x + Math.min(r.width / 2, 120)), cy: Math.round(r.y + r.height / 2) }
+    }
+    return null
+  }).catch(() => null)
+  if (!pt) return false
+  await page.mouse.click(pt.cx, pt.cy).catch(() => {})
+  await page.waitForTimeout(1500)
+  return true
+}
+
+/** 评论框右侧那颗红色发送按钮（Draft.js，回车是换行不发） */
+async function sendComment(page) {
+  const pt = await page.evaluate(() => {
+    const box = document.querySelector('div[role="textbox"]') || document.querySelector('[contenteditable]')
+    if (!box) return null
+    const br = box.getBoundingClientRect()
+    const cands = []
+    for (const el of Array.from(document.querySelectorAll('div, span, button'))) {
+      const r = el.getBoundingClientRect()
+      if (!r.width || !r.height) continue
+      if (r.width > 60 || r.height > 60) continue // 发送按钮是小圆点，排除大容器
+      if (r.y < br.y - 12 || r.y > br.y + br.height + 12) continue
+      if (r.x < br.x + 200 || r.x > br.right + 130) continue
+      const bg = getComputedStyle(el).backgroundColor || ''
+      cands.push({ cx: Math.round(r.x + r.width / 2), cy: Math.round(r.y + r.height / 2), bg, x: Math.round(r.x) })
+    }
+    const red = cands.find((c) => /254,\s*44,\s*85|254,\s*44,\s*84|fe2c55/i.test(c.bg))
+    if (red) return { cx: red.cx, cy: red.cy, why: 'red' }
+    cands.sort((a, b) => b.x - a.x)
+    return cands[0] ? { cx: cands[0].cx, cy: cands[0].cy, why: 'rightmost:' + cands[0].bg } : null
+  }).catch(() => null)
+  if (!pt) return false
+  await page.keyboard.press('Escape').catch(() => {})
+  await page.waitForTimeout(400)
+  await page.mouse.click(pt.cx, pt.cy).catch(() => {})
+  await page.waitForTimeout(2000)
+  return pt.why
+}
+
 async function interact(cfg, page, st, feel) {
   const today = new Date().toISOString().slice(0, 10)
   if (!st.quota || st.quota.date !== today) st.quota = { date: today, like: 0, collect: 0, comment: 0 }
@@ -327,18 +419,32 @@ async function interact(cfg, page, st, feel) {
 
   if (!cfg.interact.like && !cfg.interact.collect && !cfg.interact.comment) return result
   await page.waitForTimeout(1500)
+  const bar = await bottomIcons(page)
+  if (bar.length) result.via.bar = `${bar.length} 个图标（y=${bar[0].cy}）`
 
   if (cfg.interact.like) {
     const max = quotaCap(cap.like)
     if (overQuota(st.quota.like, max)) result.skipped.like = `今日点赞额度用完（${quotaText(st.quota.like, max)}）`
     else {
-      const r = await clickAny(page, SEL.like, ['点赞', '赞'])
+      let r = { ok: false, via: '', already: false }
+      const pt = bar[0]
+      if (pt) {
+        const already = await likedState(page, pt)
+        if (already === true) r = { ok: true, already: true, via: 'bar:红心本来就亮着' }
+        else {
+          await page.mouse.click(pt.cx, pt.cy).catch(() => {})
+          await page.waitForTimeout(1400)
+          const now = await likedState(page, pt)
+          r = now === false ? { ok: false, via: 'bar:点了仍是灰心' } : { ok: true, via: 'bar:红心亮起', already: false }
+        }
+      }
+      if (!r.ok) r = await clickAny(page, SEL.like, ['点赞', '赞'])
       if (r.ok) {
         result.liked = true
         result.via.like = r.via
         if (!r.already) st.quota.like += 1
         await page.waitForTimeout(900)
-      } else result.skipped.like = '没找到点赞按钮（页面结构可能变了，可跑 --probe 看）'
+      } else result.skipped.like = '没找到点赞按钮（' + (r.via || '页面结构可能变了，可跑 --probe 看') + '）'
     }
   }
 
@@ -346,7 +452,14 @@ async function interact(cfg, page, st, feel) {
     const max = quotaCap(cap.collect)
     if (overQuota(st.quota.collect, max)) result.skipped.collect = `今日收藏额度用完（${quotaText(st.quota.collect, max)}）`
     else {
-      const r = await clickAny(page, SEL.collect, ['收藏'])
+      let r = { ok: false, via: '' }
+      const pt = bar[2]
+      if (pt) {
+        await page.mouse.click(pt.cx, pt.cy).catch(() => {})
+        await page.waitForTimeout(1200)
+        r = { ok: true, via: 'bar:第3个图标' }
+      }
+      if (!r.ok) r = await clickAny(page, SEL.collect, ['收藏'])
       if (r.ok) {
         result.collected = true
         result.via.collect = r.via
@@ -363,10 +476,18 @@ async function interact(cfg, page, st, feel) {
     else if (!built.text) result.skipped.comment = '评论内容为空（commentText 与 feel 都没东西）'
     else {
       try {
-        const opened = await clickAny(page, SEL.comment, ['评论'])
+        let opened = { ok: false, via: '' }
+        if (bar[1]) {
+          await page.mouse.click(bar[1].cx, bar[1].cy).catch(() => {})
+          await page.waitForTimeout(1800)
+          opened = { ok: true, via: 'bar:第2个图标' }
+        }
+        if (!opened.ok) opened = await clickAny(page, SEL.comment, ['评论'])
         if (!opened.ok) result.skipped.comment = '没找到评论入口'
         else {
           await page.waitForTimeout(2000)
+          await openCommentBox(page)
+          await page.waitForTimeout(1200)
           let boxSel = ''
           for (const sel of SEL.commentBox) {
             try {
@@ -393,13 +514,20 @@ async function interact(cfg, page, st, feel) {
               await page.keyboard.type(text, { delay: 60 })
             }
             await page.waitForTimeout(800)
-            const pub = await clickAny(page, SEL.publish, ['发送', '发布'])
-            if (!pub.ok) {
-              await page.keyboard.press('Enter').catch(() => {})
-            }
-            result.commented = true
-            result.via.comment = pub.ok ? pub.via : 'Enter'
-            st.quota.comment += 1
+            const sent = await sendComment(page)
+            if (!sent) await page.keyboard.press('Enter').catch(() => {})
+            await page.waitForTimeout(1600)
+            const echoed = await page.evaluate((t) => {
+              const box = document.querySelector('div[role="textbox"]') || document.querySelector('[contenteditable]') || document.querySelector('input[placeholder*="评论"]')
+              const boxText = box ? (box.value !== undefined ? String(box.value) : (box.innerText || '')) : ''
+              const boxEmpty = boxText.trim() === ''
+              const inList = Array.from(document.querySelectorAll('[data-e2e="comment-item"]')).some((e) => (e.innerText || '').includes(t))
+              return { boxEmpty, inList, boxText: boxText.slice(0, 40) }
+            }, text).catch(() => ({ boxEmpty: false, inList: false, boxText: '?' }))
+            await page.screenshot({ path: HOME + '\\comment-shot.png' }).catch(() => {})
+            result.commented = !!(echoed.boxEmpty || echoed.inList)
+            result.via.comment = echoed.inList ? '发送（已出现在评论列表）' : echoed.boxEmpty ? '发送（输入框已清空）' : '发送（无回显，可能没发出去）'
+            if (result.commented) st.quota.comment += 1
             result.text = text
           }
         }
@@ -417,7 +545,7 @@ async function doRun({ force }) {
   const cfg = loadConfig()
   const now = new Date()
   const hour = now.getHours()
-  if (hour < cfg.windowStart || hour >= cfg.windowEnd) {
+  if (!force && (hour < cfg.windowStart || hour >= cfg.windowEnd)) {
     emit({ ok: false, skipped: `不在 ${cfg.windowStart}-${cfg.windowEnd} 点窗口内`, hour })
     return
   }
@@ -442,22 +570,26 @@ async function doRun({ force }) {
       emit({ ok: false, skipped: '没读到卡片（可能被要求登录，或页面结构变了）', count: st.count })
       return
     }
-    const fresh = cards.filter((c) => !st.seen.includes(c))
+    const fresh = cards.filter((c) => !st.seen.includes(c.id))
     if (fresh.length === 0) {
       emit({ ok: false, skipped: '这一轮全是刷过的', count: st.count })
       return
     }
     const picked = fresh[Math.floor(Math.random() * fresh.length)]
-    const feel = await generateFeel(cfg, picked)
+    const feel = await generateFeel(cfg, picked.title)
+    // 列表页没有互动栏，进单条详情页再点赞/收藏/评论
+    await page.goto('https://www.douyin.com/video/' + picked.id, { waitUntil: 'domcontentloaded', timeout: 45000 })
+    await page.waitForTimeout(5000)
     const interaction = await interact(cfg, page, st, feel)
     st.count += 1
     st.lastAt = now.getTime()
-    st.seen = [...st.seen, picked].slice(-cfg.keepSeen)
+    st.seen = [...st.seen, picked.id].slice(-cfg.keepSeen)
     saveState(st)
-    appendJournal({ title: picked.slice(0, 200), note: feel, interaction, source: '推荐流' })
+    appendJournal({ title: picked.title, note: feel, interaction, source: '推荐流' })
     emit({
       ok: true,
-      title: picked.slice(0, 200),
+      title: picked.title,
+      url: 'https://www.douyin.com/video/' + picked.id,
       feel,
       interaction,
       count: st.count,
@@ -481,7 +613,8 @@ function doConfig() {
 async function doProbe() {
   const { ctx, page, cfg } = await openBrowser({ interactive: false })
   try {
-    await page.goto(cfg.feedUrl, { waitUntil: 'domcontentloaded', timeout: 45000 })
+    const urlArg = argv.find((a) => a.startsWith('--url='))
+    await page.goto(urlArg ? urlArg.slice('--url='.length) : cfg.feedUrl, { waitUntil: 'domcontentloaded', timeout: 45000 })
     await page.waitForTimeout(6000)
     const loggedIn = await isLoggedIn(ctx)
     const dataE2e = await page.evaluate(() => Array.from(new Set(Array.from(document.querySelectorAll('[data-e2e]')).map((e) => e.getAttribute('data-e2e')))).slice(0, 80)).catch(() => [])
@@ -489,10 +622,38 @@ async function doProbe() {
     for (const [k, sels] of Object.entries(SEL)) {
       hits[k] = []
       for (const s of sels) {
-        try { if (await page.locator(s).count()) hits[k].push(s) } catch { /* 忽略 */ }
+        try {
+          const el = page.locator(s).first()
+          const n = await el.count()
+          if (!n) continue
+          const vis = await el.isVisible().catch(() => null)
+          const box = await el.boundingBox().catch(() => null)
+          hits[k].push({ sel: s, n, vis, box })
+        } catch { /* 忽略 */ }
       }
     }
-    emit({ ok: true, loggedIn, title: await page.title(), dataE2e, hits })
+    emit({ ok: true, loggedIn, title: await page.title(), dataE2e, hits, dom: await page.evaluate(() => {
+      const buttons = []
+      for (const el of Array.from(document.querySelectorAll('[aria-label], [title], [role="button"], button, svg')).slice(0, 150)) {
+        buttons.push({
+          tag: el.tagName,
+          aria: el.getAttribute('aria-label') || '',
+          title: el.getAttribute('title') || '',
+          cls: String(el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className || '').slice(0, 70),
+          text: (el.textContent || '').trim().slice(0, 24),
+        })
+      }
+      const names = new Set()
+      for (const el of Array.from(document.querySelectorAll('div, span, button, li')).slice(0, 2000)) {
+        for (const a of Array.from(el.attributes || [])) if (a.name.indexOf('data-') === 0) names.add(a.name)
+      }
+      const cards = []
+      for (const el of Array.from(document.querySelectorAll('[data-aweme-id]')).slice(0, 12)) {
+        cards.push({ id: el.getAttribute('data-aweme-id'), text: (el.textContent || '').trim().slice(0, 40) })
+      }
+      return { videos: document.querySelectorAll('video').length, buttons, dataAttrs: Array.from(names).slice(0, 60), cards }
+    }).catch(() => ({ videos: 0, buttons: [], dataAttrs: [] })),
+    shot: await page.screenshot({ path: HOME + '\\probe.png' }).then(() => HOME + '\\probe.png').catch(() => '') })
   } catch (e) {
     emit({ ok: false, error: e && e.message ? e.message : String(e) })
   } finally {
