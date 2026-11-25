@@ -19,8 +19,11 @@ import { chromium } from 'playwright-core'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { spawn } from 'node:child_process'
 
 const HOME = process.env.SHUA_DOUYIN_HOME || path.join(os.homedir(), '.dsh', 'shua-douyin')
+const SELF_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROFILE_DIR = path.join(HOME, 'profile')
 const STATE_FILE = path.join(HOME, 'state.json')
 const JOURNAL_FILE = path.join(HOME, 'journal.jsonl')
@@ -40,6 +43,8 @@ const DEFAULTS = {
   commentText: '{feel} {at}',
   atHandle: '',
   mentionWaitMs: 1500,
+  hearVideo: false,
+  earRunner: '',
   model: {
     apiKey: '',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
@@ -194,6 +199,41 @@ async function readFeed(page, feedUrl) {
     for (const c of batch) if (!cards.has(c.id)) cards.set(c.id, c)
   }
   return [...cards.values()]
+}
+
+/** 把视频的音频直链交给「机器人耳朵」转成文字；没装耳朵时返回空串，不影响原来的一轮 */
+async function transcribeAudio(cfg, url) {
+  if (!url) return ''
+  const ear = String(cfg.earRunner || '').trim() || path.join(SELF_DIR, '..', 'dsh-robot-ear', 'runner.mjs')
+  if (!fs.existsSync(ear)) {
+    log('耳朵不在预期位置：' + ear + '（可在配置 earRunner 里指过去）')
+    return ''
+  }
+  log('把音频交给耳朵：' + url.slice(0, 90))
+  return await new Promise((resolve) => {
+    let out = ''
+    let child
+    try {
+      child = spawn(process.execPath, [ear, '--run', url], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, windowsHide: true })
+    } catch (e) {
+      log('启动耳朵失败：' + (e && e.message ? e.message : e))
+      resolve('')
+      return
+    }
+    const timer = setTimeout(() => { try { child.kill() } catch { /* 已退出 */ } }, 10 * 60 * 1000)
+    child.stdout.on('data', (d) => { out += d.toString() })
+    child.stderr.on('data', (d) => { log('[ear] ' + d.toString().trim().slice(0, 120)) })
+    child.on('close', () => {
+      clearTimeout(timer)
+      const line = out.split(/\r?\n/).find((l) => l.startsWith('RESULT:'))
+      if (!line) { log('耳朵没给结果'); resolve(''); return }
+      try {
+        const r = JSON.parse(line.slice('RESULT:'.length))
+        if (!r.ok) { log('耳朵转写失败：' + (r.error || '')); resolve(''); return }
+        resolve(String(r.text || ''))
+      } catch { resolve('') }
+    })
+  })
 }
 
 async function generateFeel(cfg, text) {
@@ -592,21 +632,40 @@ async function doRun({ force, ui }) {
       return
     }
     const picked = fresh[Math.floor(Math.random() * fresh.length)]
-    const feel = await generateFeel(cfg, picked.title)
-    // 列表页没有互动栏，进单条详情页再点赞/收藏/评论
+    // 进详情页顺带接住音频直链：列表页没有互动栏，也听不到声音
+    let audioUrl = ''
+    const catchAudio = (req) => {
+      const u = req.url()
+      if (!audioUrl && /media-audio/i.test(u)) audioUrl = u
+      else if (!audioUrl && /\.m3u8/i.test(u)) audioUrl = u
+    }
+    if (cfg.hearVideo) page.on('request', catchAudio)
     await page.goto('https://www.douyin.com/video/' + picked.id, { waitUntil: 'domcontentloaded', timeout: 45000 })
-    await page.waitForTimeout(5000)
+    await page.waitForTimeout(6000)
+    let transcript = ''
+    if (cfg.hearVideo) {
+      if (!audioUrl) await page.waitForTimeout(4000)
+      try { page.off('request', catchAudio) } catch { /* 老版本没有 off */ }
+      transcript = await transcribeAudio(cfg, audioUrl)
+      if (transcript) log(`耳朵听完了：${transcript.length} 字`)
+    }
+    const feelSource = transcript
+      ? `${picked.title}\n\n（它自己口播的内容，供参考）${transcript.slice(0, 400)}`
+      : picked.title
+    const feel = await generateFeel(cfg, feelSource)
     const interaction = await interact(cfg, page, st, feel)
     st.count += 1
     st.lastAt = now.getTime()
     st.seen = [...st.seen, picked.id].slice(-cfg.keepSeen)
     saveState(st)
-    appendJournal({ title: picked.title, note: feel, interaction, source: '推荐流' })
+    appendJournal({ title: picked.title, note: feel, interaction, source: '推荐流', heard: transcript ? transcript.slice(0, 300) : '' })
     emit({
       ok: true,
       title: picked.title,
       url: 'https://www.douyin.com/video/' + picked.id,
       feel,
+      heard: transcript ? transcript.length : 0,
+      audio: audioUrl ? 'captured' : '',
       interaction,
       count: st.count,
       maxPerDay: cfg.maxPerDay,

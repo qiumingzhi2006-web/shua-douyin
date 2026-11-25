@@ -33,6 +33,11 @@ window.__ModuleLoader__.load({
       minGap: '两轮至少隔多少分钟',
       windowStart: '几点开始',
       windowEnd: '几点停',
+      earTitle: '耳朵',
+      hearVideo: '先听懂再吐槽',
+      hearVideoHint: '进视频页后接住音频直链，交给「机器人耳朵」转文字，再让模型照着内容写感想；不装耳朵时保持原来的只看标题',
+      earRunner: '耳朵程序路径',
+      earRunnerHint: '留空就找同级的 dsh-robot-ear/runner.mjs',
       atTitle: '@ 与文案',
       atHandle: '评论里 @ 谁',
       atHandleHint: '抖音昵称或抖音号，带不带 @ 都认；留空就是不 @',
@@ -77,6 +82,11 @@ window.__ModuleLoader__.load({
       atHandleHint: 'Douyin nickname or ID, with or without a leading @; empty means no mention',
       commentText: 'Comment template',
       commentTextHint: '{feel} becomes the reaction, {at} becomes the handle above',
+      earTitle: 'Ears',
+      hearVideo: 'Understand before reacting',
+      hearVideoHint: 'Grab the audio stream on the video page and let Robot Ear turn it into text before the model writes the reaction; stays title-only if Robot Ear is missing',
+      earRunner: 'Ear runner path',
+      earRunnerHint: 'Leave empty to use the sibling dsh-robot-ear/runner.mjs',
       today: 'Today',
       usedLike: 'like {n}/{cap}',
       usedCollect: 'collect {n}/{cap}',
@@ -306,6 +316,17 @@ window.__ModuleLoader__.load({
             onChange: (event) => merge({ commentText: event.target.value }),
           })))
 
+      const earCard = h('div', { className: 'sdCard', key: 'ear' },
+        h('p', { className: 'sdCardTitle' }, t('earTitle')),
+        h(Row, { key: 'hear', label: t('hearVideo'), hint: t('hearVideoHint') },
+          h(Switch, { checked: cfg.hearVideo === true, onChange: (v) => merge({ hearVideo: v }), t })),
+        h(Row, { key: 'runner', label: t('earRunner'), hint: t('earRunnerHint') },
+          h('input', {
+            className: 'sdText', type: 'text', placeholder: '…/dsh-robot-ear/runner.mjs',
+            value: cfg.earRunner || '',
+            onChange: (event) => merge({ earRunner: event.target.value }),
+          })))
+
       const statsLine = stats
         ? t('today') + '：' + t('usedLike', { n: used.like || 0, cap: capLabel(quota.like) })
           + ' · ' + t('usedCollect', { n: used.collect || 0, cap: capLabel(quota.collect) })
@@ -322,7 +343,7 @@ window.__ModuleLoader__.load({
             type: 'button', className: 'sdButton sdButtonPrimary', disabled: busy, onClick: save, key: 'save',
           }, busy ? t('saving') : t('save'))))
 
-      return shell([heading, interactCard, feedCard, atCard, footer])
+      return shell([heading, interactCard, feedCard, atCard, earCard, footer])
     }
 
     function PanelIcon({ size }) {

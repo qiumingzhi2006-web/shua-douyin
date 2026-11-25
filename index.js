@@ -368,6 +368,8 @@ function sanitizePatch(body) {
   if (out.windowEnd !== undefined) out.windowEnd = Math.min(Math.max(out.windowEnd, 0), 24)
   if (out.maxPerDay !== undefined && out.maxPerDay < -1) out.maxPerDay = -1
   if (out.minGapMin !== undefined && out.minGapMin < 0) out.minGapMin = 0
+  if (typeof body.hearVideo === 'boolean') out.hearVideo = body.hearVideo
+  if (typeof body.earRunner === 'string') out.earRunner = body.earRunner.trim().slice(0, 400)
   if (body.interact && typeof body.interact === 'object') {
     out.interact = {
       like: body.interact.like === true,
