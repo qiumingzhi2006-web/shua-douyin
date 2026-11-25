@@ -236,9 +236,29 @@ async function transcribeAudio(cfg, url) {
   })
 }
 
+/** 没有模型时的兜底：从听来的口播里摘一句最像主题的，让评论真的跟内容有关 */
+function pickTranscriptLine(src) {
+  const marker = '（它自己口播的内容，供参考）'
+  const at = String(src || '').indexOf(marker)
+  if (at < 0) return ''
+  const body = src.slice(at + marker.length).replace(/\s+/g, ' ')
+  const parts = body.split(/[。！？!?；;，,]/).map((s) => s.trim())
+    .filter((s) => s.length >= 10 && s.length <= 34 && !/我的心里|感谢观看/.test(s))
+  if (!parts.length && body.length >= 12) {
+    // whisper 的中文常常一个标点都不给：退化成取中段一段话，总比空着强
+    const mid = Math.floor(body.length / 2)
+    const seg = body.slice(Math.max(0, mid - 12), Math.min(body.length, mid + 12)).trim()
+    if (seg.length >= 8) parts.push(seg)
+  }
+  if (!parts.length) return ''
+  return parts[Math.floor(parts.length / 2)].replace(/["'“”「」]/g, '').slice(0, 34)
+}
+
 async function generateFeel(cfg, text) {
   const apiKey = cfg.model.apiKey || process.env.SHUA_DOUYIN_API_KEY || ''
   if (!apiKey) {
+    const quoted = pickTranscriptLine(text)
+    if (quoted) return `听到「${quoted}」，这句我记下了`
     return FALLBACK_LINES[Math.floor(Math.random() * FALLBACK_LINES.length)]
   }
   const body = {
