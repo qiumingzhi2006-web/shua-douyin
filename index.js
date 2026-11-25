@@ -162,7 +162,9 @@ function tools() {
         return {
           ok: true,
           message: `刷到一条（本轮候选 ${res.candidates} 条，没看过 ${res.fresh} 条）：\n\n`
-            + `「${res.title}」\n→ ${res.feel}\n\n${flags}${atLine}　${rounds}`
+            + `「${res.title}」\n→ ${res.feel}\n`
+            + (res.heardHead ? `耳朵听到：${res.heardHead}…\n` : '')
+            + `\n${flags}${atLine}　${rounds}`
             + (it.text ? `\n评论内容：${it.text}` : '')
             + (why ? `\n没做成的：${why}` : '')
             + q,

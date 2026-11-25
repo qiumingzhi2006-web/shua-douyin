@@ -685,6 +685,7 @@ async function doRun({ force, ui }) {
       url: 'https://www.douyin.com/video/' + picked.id,
       feel,
       heard: transcript ? transcript.length : 0,
+      heardHead: transcript ? transcript.slice(0, 80) : '',
       audio: audioUrl ? 'captured' : '',
       interaction,
       count: st.count,
