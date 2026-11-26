@@ -33,6 +33,13 @@ const LOG_FILE = path.join(HOME, 'run.log')
 const DEFAULTS = {
   browserChannel: 'msedge',
   feedUrl: 'https://www.douyin.com/jingxuan',
+  // 每轮换一个来源：精选 / 推荐 / 热门 / 搜「大肥鱼」。哪个读不到卡片就顺延下一个
+  feeds: [
+    { name: '精选', url: 'https://www.douyin.com/jingxuan' },
+    { name: '推荐', url: 'https://www.douyin.com/?recommend=1' },
+    { name: '热门', url: 'https://www.douyin.com/hot' },
+    { name: '大肥鱼', url: 'https://www.douyin.com/search/大肥鱼?type=video' },
+  ],
   windowStart: 9,
   windowEnd: 22,
   maxPerDay: 6,
@@ -193,6 +200,14 @@ async function readFeed(page, feedUrl) {
         const t = (el.innerText || '').replace(/\s+/g, ' ').trim()
         if (t.length < 8) continue
         out.push({ id, title: t.slice(0, 160) })
+      }
+      // 搜索页、热榜页没有 data-aweme-id，只能从 /video/ 链接里取
+      for (const a of Array.from(document.querySelectorAll('a[href*="/video/"]'))) {
+        const m = (a.getAttribute('href') || '').match(/\/video\/(\d{15,})/)
+        if (!m) continue
+        const t = (a.innerText || a.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim()
+        if (t.length < 8) continue
+        out.push({ id: m[1], title: t.slice(0, 160) })
       }
       return out.slice(0, 40)
     })
@@ -641,11 +656,31 @@ async function doRun({ force, ui }) {
 
   const { ctx, page } = await openBrowser({ interactive: !!ui })
   try {
-    const cards = await readFeed(page, cfg.feedUrl)
-    if (cards.length === 0) {
-      emit({ ok: false, skipped: '没读到卡片（可能被要求登录，或页面结构变了）', count: st.count })
+    const feedList = (Array.isArray(cfg.feeds) && cfg.feeds.length ? cfg.feeds : [{ name: '精选', url: cfg.feedUrl }])
+      .filter((f) => f && f.url)
+    const startIdx = Number.isInteger(st.feedIdx) ? (st.feedIdx % feedList.length + feedList.length) % feedList.length : 0
+    let pickedFeed = null
+    let cards = []
+    for (let k = 0; k < feedList.length; k++) {
+      const f = feedList[(startIdx + k) % feedList.length]
+      try {
+        cards = await readFeed(page, f.url)
+      } catch (e) {
+        log('读「' + f.name + '」失败：' + e.message)
+        cards = []
+      }
+      if (cards.length) {
+        pickedFeed = f
+        st.feedIdx = (startIdx + k + 1) % feedList.length
+        break
+      }
+      log('「' + f.name + '」没读到卡片，换下一个来源')
+    }
+    if (!pickedFeed) {
+      emit({ ok: false, skipped: '四个来源都没读到卡片（可能被要求登录，或页面结构变了）', count: st.count })
       return
     }
+    log('本轮来源：' + pickedFeed.name)
     const fresh = cards.filter((c) => !st.seen.includes(c.id))
     if (fresh.length === 0) {
       emit({ ok: false, skipped: '这一轮全是刷过的', count: st.count })
@@ -678,10 +713,11 @@ async function doRun({ force, ui }) {
     st.lastAt = now.getTime()
     st.seen = [...st.seen, picked.id].slice(-cfg.keepSeen)
     saveState(st)
-    appendJournal({ title: picked.title, note: feel, interaction, source: '推荐流', heard: transcript ? transcript.slice(0, 300) : '' })
+    appendJournal({ title: picked.title, note: feel, interaction, source: pickedFeed.name, heard: transcript ? transcript.slice(0, 300) : '' })
     emit({
       ok: true,
       title: picked.title,
+      source: pickedFeed.name,
       url: 'https://www.douyin.com/video/' + picked.id,
       feel,
       heard: transcript ? transcript.length : 0,
@@ -747,7 +783,7 @@ async function doProbe() {
       for (const el of Array.from(document.querySelectorAll('[data-aweme-id]')).slice(0, 12)) {
         cards.push({ id: el.getAttribute('data-aweme-id'), text: (el.textContent || '').trim().slice(0, 40) })
       }
-      return { videos: document.querySelectorAll('video').length, buttons, dataAttrs: Array.from(names).slice(0, 60), cards }
+      return { videos: document.querySelectorAll('video').length, links: document.querySelectorAll('a[href*="/video/"]').length, buttons, dataAttrs: Array.from(names).slice(0, 60), cards }
     }).catch(() => ({ videos: 0, buttons: [], dataAttrs: [] })),
     shot: await page.screenshot({ path: HOME + '\\probe.png' }).then(() => HOME + '\\probe.png').catch(() => '') })
   } catch (e) {
